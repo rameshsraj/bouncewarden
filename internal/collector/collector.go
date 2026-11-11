@@ -217,14 +217,17 @@ func (c *Collector) collectOnce(ctx context.Context) {
 		if in.Reachable {
 			continue
 		}
-		// keep prior last-known data marked stale
+		// keep prior last-known data marked stale until it recovers;
+		// the error stays the current failure reason
 		if c.latest != nil {
 			for _, old := range c.latest.Instances {
-				if old.Name == in.Name && old.Reachable {
+				if old.Name == in.Name && (old.Reachable || old.Stale) {
+					freshErr := in.Error
 					old.Stale = true
 					*in = *old
 					in.Reachable = false
 					in.Stale = true
+					in.Error = freshErr
 					if in.Error == "" {
 						in.Error = "unreachable; showing last known values"
 					}
