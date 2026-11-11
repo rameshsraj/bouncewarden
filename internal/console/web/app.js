@@ -183,7 +183,8 @@ function render() {
   renderHeader();
   const m = $("#main");
   const fn = {
-    overview: pageOverview, pools: pagePools, connections: pageConnections,
+    overview: pageOverview, topology: pageTopology, pools: pagePools,
+    connections: pageConnections,
     operations: pageOperations, configuration: pageConfiguration, audit: pageAudit,
   }[S.page] || pageOverview;
   m.innerHTML = "";
@@ -331,6 +332,179 @@ function pageConnections(m) {
       <div class="tablewrap"><table><thead><tr><th>Inst</th><th>User</th><th>DB</th><th>State</th><th>Backend</th><th class="num">Wait</th><th>Age</th><th>TLS</th><th>Flags</th></tr></thead>
       <tbody>${conn((i) => i.servers, true)}</tbody></table></div></div>
   </div>`;
+}
+
+/* ---------- topology ---------- */
+/* clients → pooler → logical pool → backend. Solid edges = observed
+   connections; dashed = configured target with no observed links.
+   Edges show connection counts only — per-edge byte rates are not
+   attributable from SHOW STATS (database-level), so none are drawn. */
+let topoScale = 1;
+function pageTopology(m) {
+  const inst = selected();
+  if (!inst.length) { m.innerHTML = `<div class="panel empty">No instances configured.</div>`; return; }
+  m.innerHTML = `<div class="panel"><h2>Topology <span class="sub">observed connection graph per instance</span></h2>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+      <input id="topoSearch" placeholder="search nodes…" style="width:180px">
+      <button class="ghost small" id="tzIn">+</button>
+      <button class="ghost small" id="tzOut">−</button>
+      <button class="ghost small" id="tzFit">fit</button>
+      <span class="muted" style="font-size:11px">solid = observed links · dashed = configured, no traffic · amber = waiting</span>
+    </div>
+    <div id="topoWrap" style="overflow:auto"><svg id="topoSvg" class="chart" style="height:auto"></svg></div>
+    <div id="topoDetail" class="probebox hidden" style="margin-top:10px"></div>
+  </div>`;
+  drawTopology();
+  $("#topoSearch").addEventListener("input", drawTopology);
+  $("#tzIn").onclick = () => { topoScale = Math.min(3, topoScale * 1.25); applyTopoSize(); };
+  $("#tzOut").onclick = () => { topoScale = Math.max(0.4, topoScale / 1.25); applyTopoSize(); };
+  $("#tzFit").onclick = () => { topoScale = 1; applyTopoSize(); };
+}
+
+function applyTopoSize() {
+  const svg = $("#topoSvg");
+  if (svg) svg.style.width = (svg.dataset.w * topoScale) + "px";
+}
+
+function drawTopology() {
+  const q = ($("#topoSearch")?.value || "").toLowerCase();
+  const NW = 190, NH = 40, GAP = 12, ROWH = NH + GAP, BAND = 34;
+  const CX = { client: 30, inst: 350, pool: 590, back: 840 };
+  const W = 1060;
+  const det = []; // detail records, index = data-di
+
+  const match = (t) => !q || String(t).toLowerCase().includes(q);
+  const dim = (t) => q && !match(t) ? ' opacity="0.22"' : "";
+
+  let y = 20, svg = "";
+  for (const inx of selected()) {
+    // client groups: addr + app + db
+    const gmap = {};
+    for (const c of inx.clients || []) {
+      const k = c.addr + "|" + (c.app_name || "") + "|" + c.database;
+      const g = gmap[k] = gmap[k] || { addr: c.addr, app: c.app_name, db: c.database, n: 0, act: 0, wait: 0 };
+      g.n++;
+      if (c.state === "waiting") g.wait++;
+      else g.act++;
+    }
+    const clients = Object.values(gmap);
+    const pools = (inx.pools || []).filter((p) => p.database !== "pgbouncer");
+    const dbRow = Object.fromEntries((inx.databases || []).map((d) => [d.name, d]));
+    const srvByDb = {};
+    for (const s of inx.servers || []) {
+      const e = srvByDb[s.database] = srvByDb[s.database] || { n: 0, addrs: {}, states: {} };
+      e.n++;
+      e.addrs[s.addr + ":" + s.port] = (e.addrs[s.addr + ":" + s.port] || 0) + 1;
+      e.states[s.state] = (e.states[s.state] || 0) + 1;
+    }
+    const backs = (inx.databases || []).filter((d) => d.host && d.name !== "pgbouncer");
+
+    const rows = Math.max(clients.length, pools.length, backs.length, 1);
+    const bandH = rows * ROWH + BAND;
+    const cy = (i) => y + BAND + i * ROWH + NH / 2;
+
+    // band header
+    const hdr = `${inx.name} · ${inx.host}:${inx.port} · ${inx.version || "?"}${inx.paused ? " · PAUSED" : ""}${inx.suspended ? " · SUSPENDED" : ""}${inx.stale ? " · STALE" : ""}`;
+    svg += `<g${dim(inx.name)}><rect x="14" y="${y}" width="${W - 28}" height="${bandH}" rx="8" fill="var(--panel2)" stroke="var(--border)" stroke-width=".6"/>` +
+      `<text x="26" y="${y + 22}" fill="var(--muted)" font-size="12" font-weight="600">${esc(hdr)}</text></g>`;
+
+    const node = (di, x, ny, title, sub, stroke, fill = "var(--panel)") => {
+      return `<g data-di="${di}"${dim(title)} style="cursor:pointer">
+        <rect x="${x}" y="${ny - NH / 2}" width="${NW}" height="${NH}" rx="7" fill="${fill}" stroke="${stroke}" stroke-width="1.4"/>
+        <text x="${x + 9}" y="${ny - 4}" fill="var(--text)" font-size="11.5" font-weight="600">${esc(title)}</text>
+        <text x="${x + 9}" y="${ny + 11}" fill="var(--muted)" font-size="9.5">${esc(sub)}</text></g>`;
+    };
+    const edge = (x1, y1, x2, y2, dashed, warn, label) => {
+      const mx = (x1 + x2) / 2;
+      return `<path d="M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}" fill="none"
+          stroke="${warn ? "var(--warn)" : "#64748b"}" stroke-width="${warn ? 2 : 1.1}" ${dashed ? 'stroke-dasharray="4 3"' : ""} opacity=".85"/>` +
+        (label ? `<text x="${mx}" y="${(y1 + y2) / 2 - 3}" fill="${warn ? "var(--warn)" : "var(--muted)"}" font-size="9" text-anchor="middle">${esc(label)}</text>` : "");
+    };
+    const reg = (title, rows) => { det.push({ title, rows }); return det.length - 1; };
+
+    // instance node
+    const instY = y + BAND + (rows * ROWH - ROWH) / 2 + NH / 2;
+    const iStroke = !inx.reachable ? "var(--crit)" : inx.paused || inx.suspended ? "var(--warn)" : "var(--accent)";
+    const iSub = (inx.version || "").replace("PgBouncer ", "v") +
+      (inx.paused ? " · PAUSED" : inx.suspended ? " · SUSPENDED" : inx.reachable ? " · active" : " · DOWN");
+    const instDi = reg(inx.name, [
+      ["endpoint", `${inx.host}:${inx.port}`], ["version", inx.version || "–"],
+      ["state", inx.paused ? "paused" : inx.suspended ? "suspended" : inx.reachable ? "active" : "unreachable"],
+      ["collected", inx.collected_at ? new Date(inx.collected_at).toLocaleTimeString() : "–"],
+      ["clients", String((inx.clients || []).length)], ["server links", String((inx.servers || []).length)],
+    ]);
+
+    // client group nodes + edges → instance
+    clients.forEach((g, i) => {
+      const ny = cy(i);
+      const di = reg(`${g.addr} · ${g.app || "client"}`, [
+        ["source addr", g.addr], ["app", g.app || "–"], ["database", g.db],
+        ["connections", String(g.n)], ["active", String(g.act)], ["waiting", String(g.wait)],
+      ]);
+      svg += node(di, CX.client, ny, `${g.addr} · ${g.app || "?"}`, `${g.n} conns · ${g.act} act · ${g.wait} wait`, g.wait ? "var(--warn)" : "var(--border)");
+      svg += edge(CX.client + NW, ny, CX.inst, instY, false, g.wait > 0, `${g.n} conn`);
+    });
+
+    // pool nodes + edges: instance→pool (membership), pool→backend
+    pools.forEach((p, i) => {
+      const ny = cy(i);
+      const d = dbRow[p.database] || {};
+      const sv = srvByDb[p.database] || { n: 0 };
+      const di = reg(`${p.database}/${p.user}`, [
+        ["pool", `${p.database}/${p.user}`], ["mode", p.pool_mode || d.pool_mode || "–"],
+        ["cl_active", String(p.cl_active)], ["cl_waiting", String(p.cl_waiting)],
+        ["sv_active", String(p.sv_active)], ["sv_idle", String(p.sv_idle)],
+        ["pool_size", String(d.pool_size ?? "–")], ["maxwait", p.max_wait < 0 ? "–" : (p.max_wait * 1000).toFixed(0) + " ms"],
+      ]);
+      svg += edge(CX.inst + NW, instY, CX.pool, ny, false, false, "");
+      svg += node(di, CX.pool, ny, `${p.database} / ${p.user}`,
+        `${p.pool_mode || d.pool_mode || "?"} · act ${p.cl_active} wait ${p.cl_waiting} · sv ${p.sv_active + p.sv_idle}`,
+        p.cl_waiting ? "var(--warn)" : "var(--border)");
+      if (d.host) {
+        const bi = backs.findIndex((b) => b.name === d.name);
+        if (bi >= 0) {
+          const by = cy(bi);
+          svg += edge(CX.pool + NW, ny, CX.back, by, sv.n === 0, p.cl_waiting > 0, `${sv.n} srv`);
+        }
+      }
+    });
+
+    // backend destination nodes
+    backs.forEach((d, i) => {
+      const ny = cy(i);
+      const sv = srvByDb[d.name] || { n: 0, addrs: {}, states: {} };
+      const rate = (inx.stats || {})[d.name];
+      const di = reg(`${d.name} → ${d.host}`, [
+        ["database", d.name], ["configured host(s)", `${d.host}:${d.port}`],
+        ["pool_size", String(d.pool_size)], ["reserve_pool", String(d.reserve_pool)],
+        ["observed server links", String(sv.n)],
+        ["link states", Object.entries(sv.states).map(([k, v]) => `${k}:${v}`).join(" ") || "–"],
+        ["resolved addrs", Object.entries(sv.addrs).map(([k, v]) => `${k}×${v}`).join(" ") || "–"],
+        ["paused", d.paused ? "yes" : "no"], ["disabled", d.disabled ? "yes" : "no"],
+        ["db avg xact/s", rate && rate.avg_xact_count >= 0 ? String(Math.round(rate.avg_xact_count)) : "–"],
+      ]);
+      const stroke = d.disabled ? "var(--crit)" : d.paused ? "var(--warn)" : sv.n === 0 ? "var(--border)" : "#64748b";
+      svg += node(di, CX.back, ny, `${d.name} → ${d.host}`, `:${d.port} · ${sv.n} srv links${sv.n === 0 ? " (idle)" : ""}`, stroke);
+    });
+
+    svg += node(instDi, CX.inst, instY, inx.name, iSub, iStroke);
+    y += bandH + 26;
+  }
+
+  const svgEl = $("#topoSvg");
+  svgEl.dataset.w = W;
+  svgEl.setAttribute("viewBox", `0 0 ${W} ${y}`);
+  svgEl.setAttribute("width", W * topoScale);
+  svgEl.style.width = W * topoScale + "px";
+  svgEl.innerHTML = svg;
+  svgEl.onclick = (e) => {
+    const g = e.target.closest("g[data-di]");
+    const box = $("#topoDetail");
+    if (!g) { box.classList.add("hidden"); return; }
+    const d = det[+g.dataset.di];
+    box.classList.remove("hidden");
+    box.innerHTML = `<b>${esc(d.title)}</b>\n` + d.rows.map(([k, v]) => `${k.padEnd(24)}${esc(v)}`).join("\n");
+  };
 }
 
 /* ---------- operations console ---------- */
