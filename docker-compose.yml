@@ -1,0 +1,17 @@
+# Runs the bouncewarden console alone. Point it at your PgBouncer
+# endpoints from the Configuration page, or seed config.yaml in the volume.
+services:
+  bouncewarden:
+    build: .
+    image: bouncewarden:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - bouncewarden-data:/data
+    environment:
+      # Set to require a login token before any API/UI access.
+      BOUNCEWARDEN_TOKEN: ${BOUNCEWARDEN_TOKEN:-}
+    restart: unless-stopped
+
+volumes:
+  bouncewarden-data:

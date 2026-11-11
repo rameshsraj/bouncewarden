@@ -1,0 +1,15 @@
+# spec/prompt docs — internal only, not pushed
+DASHBOARD_PROMPTS.md
+TODO_PROMPTS.md
+
+# local test bed — never pushed
+testbed/
+
+# runtime state
+data/
+*.log
+
+# build artifacts
+/bouncewarden
+/bouncewarden.exe
+dist/

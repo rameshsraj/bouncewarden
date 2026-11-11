@@ -1,0 +1,7 @@
+.git
+testbed
+data
+*.md
+!README.md
+.dockerignore
+docker-compose.yml

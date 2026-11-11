@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bouncewarden</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">bounce<span>warden</span></div>
+  <nav id="nav">
+    <a href="#overview" data-page="overview">Overview</a>
+    <a href="#pools" data-page="pools">Pools</a>
+    <a href="#connections" data-page="connections">Connections</a>
+    <a href="#operations" data-page="operations">Operations</a>
+    <a href="#configuration" data-page="configuration">Configuration</a>
+    <a href="#audit" data-page="audit">Audit</a>
+  </nav>
+  <div class="hdr-right">
+    <select id="instSel" title="Instance filter"></select>
+    <span id="liveBadge" class="badge live">LIVE</span>
+    <span id="ageBadge" class="badge" title="Sample age">—</span>
+    <button id="themeBtn" class="ghost" title="Toggle theme">◐</button>
+  </div>
+</header>
+<main id="main"></main>
+<div id="modal" class="modal hidden">
+  <div class="modal-box">
+    <h3 id="modalTitle"></h3>
+    <p id="modalBody"></p>
+    <div id="modalConfirmWrap" class="hidden">
+      <label>Type <code id="modalExpect"></code> to confirm</label>
+      <input id="modalConfirm" autocomplete="off">
+    </div>
+    <div class="modal-actions">
+      <button id="modalCancel" class="ghost">Cancel</button>
+      <button id="modalOk" class="primary">Run</button>
+    </div>
+  </div>
+</div>
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
